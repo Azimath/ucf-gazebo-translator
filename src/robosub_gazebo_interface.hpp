@@ -1,35 +1,36 @@
 #include <ros/ros.h>
-#include <geometry_msgs/Vector3.h>
-#include <image_transport/image_transport.h>
-#include <cv_bridge/cv_bridge.h>
-#include <sensor_msgs/image_encodings.h>
-#include <opencv2/imgproc/imgproc.hpp>
-#include <opencv2/highgui/highgui.hpp>
+#include <geometry_msgs/Twist.h>
+#include <gazebo_msgs/ApplyBodyWrench.h>
+#include <gazebo_msgs/BodyRequest.h>
 
-class ImageConverter
+#include <algorithm>
+//More thrust reverse
+//Minimum thrust side to side
+//More downwards
+
+//Top thuster to bottom thruster 0.1633
+//Side thuster to side thuster 0.1632
+//Front thruster to back thruster 0.216
+
+//Maximum bidirectional thrust/torque a single thruster can provide
+#define MAX_THRUST 29.42
+
+#define MAX_TORQUE_ROLL MAX_THRUST * 0.1633
+#define MAX_TORQUE_YAW MAX_THRUST * 0.1632
+#define MAX_TORQUE_PITCH MAX_THRUST * 0.216
+
+class GazeboInterface
 {
 public:
+    GazeboInterface();
 
-    ImageConverter();
-
-    ~ImageConverter();
-
-    void imageCb(const sensor_msgs::ImageConstPtr& msg);
+    ~GazeboInterface();
 
     ros::NodeHandle nh_;
-    image_transport::ImageTransport it_;
-    image_transport::Subscriber image_sub_;
-    image_transport::Publisher image_pub_;
-    ros::Publisher target_pub;
+    ros::Subscriber commandSub;
+    ros::ServiceClient gazeboWrenchCaller;
+    ros::ServiceClient gazeboStopCaller;
 
-    int iLowH = 0;
-    int iHighH = 179;
+    void commandCb(const geometry_msgs::Twist &msg);
 
-    int iLowS = 0;
-    int iHighS = 255;
-
-    int iLowV = 0;
-    int iHighV = 255;
-
-    cv::Mat prevObjectMask;
 };

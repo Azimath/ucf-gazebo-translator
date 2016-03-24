@@ -1,112 +1,85 @@
-#include <gate_search.hpp>
-
-static const char* OPENCV_WINDOW = "Image window";
+#include <robosub_gazebo_interface.hpp>
 
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "gate_finder");
-    ImageConverter ic;
+    GazeboInterface gi;
     ros::spin();
     return 0;
 }
 
-
-ImageConverter::ImageConverter()
-    : it_(nh_)
-{
-
-    //Subscribe to input video feed and publish output video feed
-    image_sub_ = it_.subscribe("/camera/rgb/image_color",1,
-                               &ImageConverter::imageCb,this);
-    image_pub_ = it_.advertise("/image_converter/output_video",1);
-    target_pub = nh_.advertise<geometry_msgs::Vector3>("targetPos", 1);
-
-    cv::namedWindow(OPENCV_WINDOW);
-
-    cvCreateTrackbar("LowH", OPENCV_WINDOW, &iLowH, 179);
-    cvCreateTrackbar("HighH", OPENCV_WINDOW, &iHighH, 179);
-
-    cvCreateTrackbar("LowS", OPENCV_WINDOW, &iLowS, 255);
-    cvCreateTrackbar("HighS", OPENCV_WINDOW, &iHighS, 255);
-
-    cvCreateTrackbar("LowV", OPENCV_WINDOW, &iLowV, 255);
-    cvCreateTrackbar("HighV", OPENCV_WINDOW, &iHighV, 255);
+template <typename T> int sgn(T val) {  //http://stackoverflow.com/a/4609795
+    return (T(0) < val) - (val < T(0));
 }
 
-ImageConverter::~ImageConverter()
+GazeboInterface::GazeboInterface()
 {
-    cv::destroyWindow(OPENCV_WINDOW);
+    commandSub = nh_.subscribe("/robosubsim/thusters", 1000, &GazeboInterface::commandCb, this);
+    gazeboWrenchCaller = nh_.serviceClient<gazebo_msgs::ApplyBodyWrench>("/gazebo/apply_body_wrench");
+    gazeboStopCaller = nh_.serviceClient<gazebo_msgs::ApplyBodyWrench>("/gazebo/clear_body_wrenches");
 }
 
-void ImageConverter::imageCb(const sensor_msgs::ImageConstPtr &msg)
+GazeboInterface::~GazeboInterface()
 {
-    cv_bridge::CvImagePtr cv_ptr; //Somewhere to keep the image from ROS
-    cv::Mat imageGray; //A place to store the incoming image as a greyscale for canny
 
-    try
-    {
-        cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8); //Converts from ROS message to cv image
-    }
-    catch (cv_bridge::Exception& e)
-    {
-        ROS_ERROR("cv_bridge exception: %s", e.what()); //Something went wrong, no idea what
-        return;
-    }
+}
 
-    cv::Mat hsvImage;
-    cv::cvtColor(cv_ptr->image, hsvImage, cv::COLOR_BGR2HSV);
+void GazeboInterface::commandCb(const geometry_msgs::Twist &msg)
+{
+    gazebo_msgs::BodyRequest stop;
+    stop.request.body_name = "ucf_submarine_simple";
 
-    cv::Mat objectMask;
-    cv::inRange(hsvImage, cv::Scalar(iLowH, iLowS, iLowV), cv::Scalar(iHighH, iHighS, iHighV), objectMask);
+    gazebo_msgs::ApplyBodyWrench wrench;
+    wrench.request.body_name = "ucf_submarine_simple::body";
+    wrench.request.reference_frame = "ucf_submarine_simple::body";
 
-    cv::Mat erodeElement = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-    cv::Mat dilateElement = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(8, 8));
-    cv::erode(objectMask, objectMask, erodeElement);
-    cv::dilate(objectMask, objectMask, dilateElement);
+    gazebo_msgs::ApplyBodyWrench bouyancyWrench;
+    bouyancyWrench.request.body_name = "ucf_submarine_simple::body";
+    bouyancyWrench.request.reference_frame = "world";
 
-    cv::Mat andMask;
-    if(!prevObjectMask.empty())
-    {
-        cv::bitwise_and(objectMask, prevObjectMask, andMask);
-        prevObjectMask = objectMask;
-    }
-    else
-    {
-        andMask = objectMask;
-    }
+    gazebo_msgs::ApplyBodyWrench weightWrench;
+    weightWrench.request.body_name = "ucf_submarine_simple::body";
+    weightWrench.request.reference_frame = "world";
 
-    cv::Mat drawing = cv::Mat::zeros( andMask.size(), CV_8UC3 );
+    //You can't deliver maximum thrust and maximum torque on the same axis, so mix things to represent this
+    //+x forward, +z down, +y right
+    float tFrontUp, tRearUp, tLeftForward, tRightForward, tTopStrafe, tBottomStrafe;
 
-    if(andMask != 0)
-    {
-        cv::Rect bounds = cv::boundingRect(andMask);
+    tFrontUp = std::max(-1.0, std::min(1.0, msg.linear.z + msg.angular.y));
+    tRearUp = std::max(-1.0, std::min(1.0, msg.linear.z - msg.angular.y));
 
-        cv::cvtColor(objectMask, drawing, cv::COLOR_GRAY2RGB);
-        cv::rectangle(drawing, bounds, cv::Scalar(255,0,0),1,8,0);
-        cv::Point centerPoint = cv::Point(bounds.x+bounds.width/2,bounds.y+bounds.height/2);
-        cv::circle(drawing, centerPoint,3, cv::Scalar(0,255,0));
-        std::stringstream pointText;
-        pointText << "(" << centerPoint.x << ", " << centerPoint.y << ") " << "Ratio: " << (double)bounds.width/(double)bounds.height;
-        cv::putText(drawing, pointText.str(), cv::Point(0,drawing.rows*9/10), 0, 1, cv::Scalar(0,0,255));
-        cv::resize(drawing, drawing, cv::Size(0, 0), 0.5, 0.5);
+    tLeftForward = std::max(-1.0, std::min(1.0, msg.linear.x - msg.angular.z));
+    tRightForward = std::max(-1.0, std::min(1.0, msg.linear.x + msg.angular.z));
 
-        geometry_msgs::Vector3 targetData;
-        targetData.x = centerPoint.x-objectMask.cols/2;
-        targetData.y = objectMask.rows/2-centerPoint.y;
-        targetData.z = (double)bounds.width/(double)bounds.height;
+    tTopStrafe = std::max(-1.0, std::min(1.0, msg.linear.y - msg.angular.x));
+    tBottomStrafe = std::max(-1.0, std::min(1.0, msg.linear.y + msg.angular.x));
 
-        target_pub.publish(targetData);
-        cv::imshow(OPENCV_WINDOW, drawing); //display the incoming image to the user
-        cv::waitKey(3);
-    }
-    else
-    {
-        ROS_INFO("No target found");
-    }
+    wrench.request.wrench.force.x = (tLeftForward + tRightForward) * MAX_THRUST;
+    wrench.request.wrench.force.y = (tTopStrafe + tBottomStrafe) * MAX_THRUST;
+    wrench.request.wrench.force.z = (tFrontUp + tRearUp) * MAX_THRUST;
 
-    //cv::Mat drawing
+    wrench.request.wrench.torque.x = (tBottomStrafe - tTopStrafe) * MAX_TORQUE_ROLL;
+    wrench.request.wrench.torque.y = (tFrontUp - tRearUp) * MAX_TORQUE_PITCH;
+    wrench.request.wrench.torque.z = (tRightForward - tBottomStrafe) * MAX_TORQUE_YAW;
 
+    wrench.request.duration.sec = -1;
+    wrench.request.start_time.sec = 0;
 
+    weightWrench.request.wrench.force.z = -10.0;
+    weightWrench.request.reference_point.z = 1.0;
 
-    image_pub_.publish(cv_ptr->toImageMsg());
+    weightWrench.request.duration.sec = -1;
+    weightWrench.request.start_time.sec = 0;
+
+    bouyancyWrench.request.wrench.force.z = 10.0;
+    bouyancyWrench.request.reference_point.z = 0.0;
+
+    bouyancyWrench.request.duration.sec = -1;
+    bouyancyWrench.request.start_time.sec = 0;
+
+    gazeboStopCaller.call(stop);
+    gazeboWrenchCaller.call(wrench);
+    //gazeboWrenchCaller.call(bouyancyWrench);
+    //gazeboWrenchCaller.call(weightWrench);
+
 }
